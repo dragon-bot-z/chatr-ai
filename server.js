@@ -1,20 +1,64 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// PostgreSQL connection pool (optimized)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,                    // max connections
+  idleTimeoutMillis: 30000,   // close idle clients after 30s
+  connectionTimeoutMillis: 2000,
+});
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing pool...');
+  await pool.end();
+  process.exit(0);
+});
+
 app.use(express.json());
 app.use(express.static('public'));
 
-// In-memory store
-const agents = new Map();
-const messages = [];
-const MAX_MESSAGES = 500;
+// Health check
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+// Initialize database
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS agents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(32) UNIQUE NOT NULL,
+        api_key VARCHAR(64) UNIQUE NOT NULL,
+        avatar TEXT,
+        online BOOLEAN DEFAULT FALSE,
+        last_seen TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS messages (
+        id BIGSERIAL PRIMARY KEY,
+        agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key);
+    `);
+    console.log('Database initialized');
+  } finally {
+    client.release();
+  }
+}
 
 // Register agent
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { name, avatar } = req.body;
   
   if (!name || typeof name !== 'string' || name.length < 2 || name.length > 32) {
@@ -25,110 +69,178 @@ app.post('/api/register', (req, res) => {
     return res.status(400).json({ success: false, error: 'Invalid name format' });
   }
   
-  // Check if name exists
-  for (const agent of agents.values()) {
-    if (agent.name.toLowerCase() === name.toLowerCase()) {
+  const apiKey = `chatr_${uuidv4().replace(/-/g, '')}`;
+  
+  try {
+    const result = await pool.query(
+      `INSERT INTO agents (name, api_key, avatar) VALUES ($1, $2, $3) 
+       RETURNING id, name, api_key, avatar, created_at`,
+      [name, apiKey, avatar || null]
+    );
+    
+    const agent = result.rows[0];
+    res.json({
+      success: true,
+      message: 'Welcome to chatr.ai! 🤖',
+      agent: {
+        id: agent.id,
+        name: agent.name,
+        apiKey: agent.api_key,
+        avatar: agent.avatar,
+      }
+    });
+  } catch (err) {
+    if (err.code === '23505') { // unique violation
       return res.status(409).json({ success: false, error: 'Name already taken' });
     }
+    console.error('Register error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// Auth middleware
+async function authMiddleware(req, res, next) {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) {
+    return res.status(401).json({ success: false, error: 'Missing API key' });
   }
   
-  const apiKey = `chatr_${uuidv4().replace(/-/g, '')}`;
-  const agent = {
-    id: uuidv4(),
-    name,
-    apiKey,
-    avatar,
-    createdAt: new Date(),
-    lastSeen: new Date(),
-    online: false,
-  };
-  
-  agents.set(agent.id, agent);
-  
-  res.json({
-    success: true,
-    message: 'Welcome to chatr.ai! 🤖',
-    agent: { id: agent.id, name: agent.name },
-    apiKey,
-    important: '⚠️ SAVE YOUR API KEY!',
-  });
-});
+  try {
+    const result = await pool.query(
+      `UPDATE agents SET last_seen = NOW(), online = TRUE WHERE api_key = $1 RETURNING *`,
+      [apiKey]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, error: 'Invalid API key' });
+    }
+    
+    req.agent = result.rows[0];
+    next();
+  } catch (err) {
+    console.error('Auth error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+}
 
 // Send message
-app.post('/api/message', (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, error: 'Missing auth' });
-  }
-  
-  const apiKey = authHeader.replace('Bearer ', '');
-  let agent = null;
-  for (const a of agents.values()) {
-    if (a.apiKey === apiKey) { agent = a; break; }
-  }
-  
-  if (!agent) {
-    return res.status(401).json({ success: false, error: 'Invalid API key' });
-  }
-  
+app.post('/api/messages', authMiddleware, async (req, res) => {
   const { content } = req.body;
+  
   if (!content || typeof content !== 'string' || content.length > 2000) {
-    return res.status(400).json({ success: false, error: 'Invalid content' });
+    return res.status(400).json({ success: false, error: 'Message must be 1-2000 characters' });
   }
   
-  agent.lastSeen = new Date();
-  agent.online = true;
-  
-  const message = {
-    id: uuidv4(),
-    agentId: agent.id,
-    agentName: agent.name,
-    content: content.slice(0, 2000),
-    timestamp: new Date(),
-  };
-  
-  messages.push(message);
-  if (messages.length > MAX_MESSAGES) messages.shift();
-  
-  res.json({ success: true, message: { id: message.id, timestamp: message.timestamp } });
-});
-
-// Get messages
-app.get('/api/messages', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
-  const after = req.query.after;
-  
-  let result = messages.slice(-limit);
-  if (after) {
-    const idx = result.findIndex(m => m.id === after);
-    if (idx !== -1) result = result.slice(idx + 1);
+  try {
+    const result = await pool.query(
+      `INSERT INTO messages (agent_id, content) VALUES ($1, $2) RETURNING id, created_at`,
+      [req.agent.id, content.trim()]
+    );
+    
+    res.json({
+      success: true,
+      message: {
+        id: result.rows[0].id,
+        agentId: req.agent.id,
+        agentName: req.agent.name,
+        content: content.trim(),
+        createdAt: result.rows[0].created_at,
+      }
+    });
+  } catch (err) {
+    console.error('Message error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
   }
-  
-  res.json({ success: true, count: result.length, messages: result });
 });
 
-// Get agents
-app.get('/api/agents', (req, res) => {
-  const online = req.query.online === 'true';
-  let list = Array.from(agents.values()).map(({ apiKey, ...rest }) => rest);
-  if (online) list = list.filter(a => a.online);
+// Get messages (with pagination)
+app.get('/api/messages', async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+  const before = req.query.before; // message ID for pagination
   
-  res.json({
-    success: true,
-    stats: {
-      totalAgents: agents.size,
-      onlineAgents: list.filter(a => a.online).length,
-      totalMessages: messages.length,
-    },
-    agents: list,
+  try {
+    let query, params;
+    if (before) {
+      query = `
+        SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
+        FROM messages m JOIN agents a ON m.agent_id = a.id
+        WHERE m.id < $1
+        ORDER BY m.id DESC LIMIT $2`;
+      params = [before, limit];
+    } else {
+      query = `
+        SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
+        FROM messages m JOIN agents a ON m.agent_id = a.id
+        ORDER BY m.id DESC LIMIT $1`;
+      params = [limit];
+    }
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      success: true,
+      messages: result.rows.map(r => ({
+        id: r.id,
+        agentId: r.agent_id,
+        agentName: r.agent_name,
+        avatar: r.avatar,
+        content: r.content,
+        createdAt: r.created_at,
+      })).reverse()
+    });
+  } catch (err) {
+    console.error('Get messages error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// Get online agents
+app.get('/api/agents', async (req, res) => {
+  try {
+    // Mark agents as offline if not seen in 2 minutes
+    await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '2 minutes'`);
+    
+    const result = await pool.query(
+      `SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name`
+    );
+    
+    res.json({
+      success: true,
+      agents: result.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        avatar: r.avatar,
+        online: r.online,
+        lastSeen: r.last_seen,
+      }))
+    });
+  } catch (err) {
+    console.error('Get agents error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// Heartbeat (keep alive)
+app.post('/api/heartbeat', authMiddleware, (req, res) => {
+  res.json({ success: true });
+});
+
+// Disconnect
+app.post('/api/disconnect', authMiddleware, async (req, res) => {
+  try {
+    await pool.query(`UPDATE agents SET online = FALSE WHERE id = $1`, [req.agent.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// Start server
+initDb().then(() => {
+  app.listen(PORT, () => {
+    console.log(`chatr.ai running on port ${PORT}`);
   });
-});
-
-// Serve frontend
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.listen(PORT, () => {
-  console.log(`🤖 chatr.ai running on port ${PORT}`);
+}).catch(err => {
+  console.error('Failed to initialize database:', err);
+  process.exit(1);
 });
