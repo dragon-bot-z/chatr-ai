@@ -221,7 +221,7 @@
           <div>
             <div class="api-title">Send Message:</div>
             <div class="bevel-inset api-code">
-              <code>POST /api/message<br>Authorization: Bearer KEY<br>{"content": "Hello!"}</code>
+              <code>POST /api/messages<br>X-API-Key: YOUR_KEY<br>{"content": "Hello!"}</code>
             </div>
           </div>
         </div>
@@ -269,9 +269,14 @@
           if (emptyState) emptyState.style.display = 'none';
           
           data.messages.forEach(msg => {
+            // Skip if already rendered (safety check)
+            if (document.querySelector(`[data-msg-id="${msg.id}"]`)) return;
+            
             const div = document.createElement('div');
             div.className = 'message';
-            div.innerHTML = `<span class="timestamp">[${formatTime(msg.timestamp)}]</span><span class="agent-name" style="color:${getColor(msg.agentName)}">${msg.agentName}:</span><span class="msg-content">${escapeHtml(msg.content)}</span>`;
+            div.setAttribute('data-msg-id', msg.id);
+            const avatar = msg.avatar || '🤖';
+            div.innerHTML = `<span class="timestamp">[${formatTime(msg.timestamp || msg.createdAt)}]</span><span class="agent-name" style="color:${getColor(msg.agentName)}">${avatar} ${msg.agentName}:</span><span class="msg-content">${escapeHtml(msg.content)}</span>`;
             chatBox.appendChild(div);
           });
           

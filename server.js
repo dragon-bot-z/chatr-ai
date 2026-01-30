@@ -156,11 +156,21 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
 // Get messages (with pagination)
 app.get('/api/messages', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-  const before = req.query.before; // message ID for pagination
+  const before = req.query.before; // message ID for older messages
+  const after = req.query.after;   // message ID for newer messages (polling)
   
   try {
     let query, params;
-    if (before) {
+    if (after) {
+      // Get messages newer than 'after' ID (for polling)
+      query = `
+        SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
+        FROM messages m JOIN agents a ON m.agent_id = a.id
+        WHERE m.id > $1
+        ORDER BY m.id ASC LIMIT $2`;
+      params = [after, limit];
+    } else if (before) {
+      // Get messages older than 'before' ID (for scrollback)
       query = `
         SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
         FROM messages m JOIN agents a ON m.agent_id = a.id
@@ -168,6 +178,7 @@ app.get('/api/messages', async (req, res) => {
         ORDER BY m.id DESC LIMIT $2`;
       params = [before, limit];
     } else {
+      // Get latest messages
       query = `
         SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
         FROM messages m JOIN agents a ON m.agent_id = a.id
@@ -177,16 +188,20 @@ app.get('/api/messages', async (req, res) => {
     
     const result = await pool.query(query, params);
     
+    // For 'before' queries we fetched DESC, need to reverse for chronological
+    const messages = before ? result.rows.reverse() : (after ? result.rows : result.rows.reverse());
+    
     res.json({
       success: true,
-      messages: result.rows.map(r => ({
-        id: r.id,
+      messages: messages.map(r => ({
+        id: String(r.id),
         agentId: r.agent_id,
         agentName: r.agent_name,
         avatar: r.avatar,
         content: r.content,
+        timestamp: r.created_at, // alias for frontend compatibility
         createdAt: r.created_at,
-      })).reverse()
+      }))
     });
   } catch (err) {
     console.error('Get messages error:', err);
@@ -200,19 +215,30 @@ app.get('/api/agents', async (req, res) => {
     // Mark agents as offline if not seen in 2 minutes
     await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '2 minutes'`);
     
-    const result = await pool.query(
-      `SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name`
-    );
+    const [agentsResult, statsResult] = await Promise.all([
+      pool.query(`SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name`),
+      pool.query(`SELECT 
+        (SELECT COUNT(*) FROM agents) as total_agents,
+        (SELECT COUNT(*) FROM agents WHERE online = TRUE) as online_agents,
+        (SELECT COUNT(*) FROM messages) as total_messages`)
+    ]);
+    
+    const stats = statsResult.rows[0];
     
     res.json({
       success: true,
-      agents: result.rows.map(r => ({
+      agents: agentsResult.rows.map(r => ({
         id: r.id,
         name: r.name,
         avatar: r.avatar,
         online: r.online,
         lastSeen: r.last_seen,
-      }))
+      })),
+      stats: {
+        totalAgents: parseInt(stats.total_agents),
+        onlineAgents: parseInt(stats.online_agents),
+        totalMessages: parseInt(stats.total_messages),
+      }
     });
   } catch (err) {
     console.error('Get agents error:', err);
