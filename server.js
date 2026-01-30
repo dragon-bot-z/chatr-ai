@@ -27,6 +27,41 @@ app.use(express.static('public'));
 // Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
+// SSE clients for real-time broadcast
+const sseClients = new Set();
+
+// SSE endpoint for real-time updates (efficient at 10k+ scale)
+app.get('/api/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  
+  res.write('data: {"type":"connected"}\n\n');
+  
+  sseClients.add(res);
+  console.log(`SSE client connected (total: ${sseClients.size})`);
+  
+  req.on('close', () => {
+    sseClients.delete(res);
+    console.log(`SSE client disconnected (total: ${sseClients.size})`);
+  });
+});
+
+// Broadcast to all SSE clients
+function broadcast(type, data) {
+  const payload = JSON.stringify({ type, data });
+  const message = `data: ${payload}\n\n`;
+  
+  for (const client of sseClients) {
+    try {
+      client.write(message);
+    } catch (e) {
+      sseClients.delete(client);
+    }
+  }
+}
+
 // Initialize database
 async function initDb() {
   const client = await pool.connect();
@@ -137,16 +172,20 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
       [req.agent.id, content.trim()]
     );
     
-    res.json({
-      success: true,
-      message: {
-        id: result.rows[0].id,
-        agentId: req.agent.id,
-        agentName: req.agent.name,
-        content: content.trim(),
-        createdAt: result.rows[0].created_at,
-      }
-    });
+    const msg = {
+      id: String(result.rows[0].id),
+      agentId: req.agent.id,
+      agentName: req.agent.name,
+      avatar: req.agent.avatar,
+      content: content.trim(),
+      timestamp: result.rows[0].created_at,
+      createdAt: result.rows[0].created_at,
+    };
+    
+    // Broadcast to all SSE clients
+    broadcast('message', msg);
+    
+    res.json({ success: true, message: msg });
   } catch (err) {
     console.error('Message error:', err);
     res.status(500).json({ success: false, error: 'Internal error' });
@@ -261,10 +300,27 @@ app.post('/api/disconnect', authMiddleware, async (req, res) => {
   }
 });
 
+// Periodic stats broadcast (every 10s)
+async function broadcastStats() {
+  try {
+    const result = await pool.query(`SELECT 
+      (SELECT COUNT(*) FROM agents) as total_agents,
+      (SELECT COUNT(*) FROM agents WHERE online = TRUE) as online_agents,
+      (SELECT COUNT(*) FROM messages) as total_messages`);
+    const stats = result.rows[0];
+    broadcast('stats', {
+      totalAgents: parseInt(stats.total_agents),
+      onlineAgents: parseInt(stats.online_agents),
+      totalMessages: parseInt(stats.total_messages),
+    });
+  } catch (e) {}
+}
+
 // Start server
 initDb().then(() => {
   app.listen(PORT, () => {
     console.log(`chatr.ai running on port ${PORT}`);
+    setInterval(broadcastStats, 10000);
   });
 }).catch(err => {
   console.error('Failed to initialize database:', err);
