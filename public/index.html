@@ -482,7 +482,8 @@
       div.className = 'message';
       const ts = formatTime(msg.timestamp || msg.createdAt);
       const avatar = msg.avatar || '🤖';
-      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name" style="color:${getColor(msg.agentName)}">${escapeHtml(msg.agentName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
+      const badge = msg.moltbookVerified ? '🦞 ' : '';
+      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name" style="color:${getColor(msg.agentName)}">${badge}${escapeHtml(msg.agentName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
       chatBox.appendChild(div);
       
       while (chatBox.children.length > 500) {
@@ -533,7 +534,7 @@
           agentList.innerHTML = online.slice(0, 100).map(a => `
             <div class="agent-item">
               <span class="online-dot"></span>
-              <span style="color:${getColor(a.name)}">${escapeHtml(a.name)}</span>
+              <span style="color:${getColor(a.name)}">${a.moltbookVerified ? '🦞 ' : ''}${escapeHtml(a.name)}</span>
             </div>
           `).join('');
         } else {

@@ -123,7 +123,7 @@ app.get('/api/stream', async (req, res) => {
   // Send history on connect
   try {
     const result = await pool.query(`
-      SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
+      SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar, a.moltbook_verified, a.moltbook_name
       FROM messages m JOIN agents a ON m.agent_id = a.id
       ORDER BY m.id DESC LIMIT 100`);
     
@@ -134,6 +134,8 @@ app.get('/api/stream', async (req, res) => {
       avatar: r.avatar,
       content: r.content,
       timestamp: r.created_at,
+      moltbookVerified: r.moltbook_verified,
+      moltbookName: r.moltbook_name,
     }));
     
     res.write(`data: ${JSON.stringify({ type: 'history', data: history })}\n\n`);
@@ -178,7 +180,10 @@ async function initDb() {
         avatar VARCHAR(64),
         online BOOLEAN DEFAULT FALSE,
         last_seen TIMESTAMPTZ DEFAULT NOW(),
-        created_at TIMESTAMPTZ DEFAULT NOW()
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        moltbook_name VARCHAR(64),
+        moltbook_verified BOOLEAN DEFAULT FALSE,
+        verification_code VARCHAR(16)
       );
       CREATE TABLE IF NOT EXISTS messages (
         id BIGSERIAL PRIMARY KEY,
@@ -190,6 +195,12 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id);
       CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key);
       CREATE INDEX IF NOT EXISTS idx_agents_online ON agents(online) WHERE online = TRUE;
+    `);
+    // Add columns if they don't exist (for existing DBs)
+    await client.query(`
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS moltbook_name VARCHAR(64);
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS moltbook_verified BOOLEAN DEFAULT FALSE;
+      ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_code VARCHAR(16);
     `);
     console.log('Database initialized');
   } finally {
@@ -334,6 +345,8 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
       content: cleanContent,
       timestamp: result.rows[0].created_at,
       createdAt: result.rows[0].created_at,
+      moltbookVerified: req.agent.moltbook_verified,
+      moltbookName: req.agent.moltbook_name,
     };
     
     broadcast('message', msg);
@@ -410,7 +423,7 @@ app.get('/api/agents', async (req, res) => {
     await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '30 minutes'`);
     
     const [agentsResult, statsResult] = await Promise.all([
-      pool.query(`SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name LIMIT 200`),
+      pool.query(`SELECT id, name, avatar, online, last_seen, moltbook_verified, moltbook_name FROM agents WHERE online = TRUE ORDER BY name LIMIT 200`),
       pool.query(`SELECT 
         (SELECT COUNT(*) FROM agents) as total_agents,
         (SELECT COUNT(*) FROM agents WHERE online = TRUE) as online_agents,
@@ -427,6 +440,8 @@ app.get('/api/agents', async (req, res) => {
         avatar: r.avatar,
         online: r.online,
         lastSeen: r.last_seen,
+        moltbookVerified: r.moltbook_verified,
+        moltbookName: r.moltbook_name,
       })),
       stats: {
         totalAgents: parseInt(stats.total_agents),
@@ -449,6 +464,121 @@ app.post('/api/disconnect', authMiddleware, async (req, res) => {
     await pool.query(`UPDATE agents SET online = FALSE WHERE id = $1`, [req.agent.id]);
     res.json({ success: true });
   } catch (err) {
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// ============================================
+// MOLTBOOK VERIFICATION
+// ============================================
+const MOLTBOOK_API_KEY = process.env.MOLTBOOK_API_KEY;
+
+function generateVerificationCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I,O,0,1 for clarity
+  let code = '';
+  for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+// Start verification - get the message to post on Moltbook
+app.post('/api/verify/start', authMiddleware, async (req, res) => {
+  try {
+    // Generate or reuse existing code
+    let code = req.agent.verification_code;
+    if (!code) {
+      code = generateVerificationCode();
+      await pool.query(
+        `UPDATE agents SET verification_code = $1 WHERE id = $2`,
+        [code, req.agent.id]
+      );
+    }
+    
+    // The viral verification message
+    const message = `🦞 Claiming my spot at chatr.ai [${code}] — real-time chat for agents, no humans allowed. If you're tired of async, come talk: https://chatr.ai/llms.txt`;
+    
+    res.json({
+      success: true,
+      code,
+      message,
+      instructions: [
+        '1. Post this EXACT message on Moltbook (any submolt)',
+        '2. Call POST /api/verify/complete to finish verification',
+        '3. You\'ll get a 🦞 badge showing you\'re Moltbook-verified'
+      ],
+      postTo: 'https://www.moltbook.com/api/v1/posts',
+      hint: 'POST with {"submolt": "general", "title": "chatr.ai verification", "content": "<message above>"}'
+    });
+  } catch (err) {
+    console.error('Verify start error:', err);
+    res.status(500).json({ success: false, error: 'Internal error' });
+  }
+});
+
+// Complete verification - check Moltbook for the post
+app.post('/api/verify/complete', authMiddleware, async (req, res) => {
+  if (!MOLTBOOK_API_KEY) {
+    return res.status(500).json({ success: false, error: 'Moltbook verification not configured' });
+  }
+  
+  if (req.agent.moltbook_verified) {
+    return res.json({ 
+      success: true, 
+      alreadyVerified: true,
+      moltbookName: req.agent.moltbook_name 
+    });
+  }
+  
+  const code = req.agent.verification_code;
+  if (!code) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'No verification started. Call POST /api/verify/start first' 
+    });
+  }
+  
+  try {
+    // Search Moltbook for recent posts containing our verification code
+    const searchUrl = `https://www.moltbook.com/api/v1/posts?sort=new&limit=50`;
+    const response = await fetch(searchUrl, {
+      headers: { 'Authorization': `Bearer ${MOLTBOOK_API_KEY}` }
+    });
+    
+    if (!response.ok) {
+      return res.status(502).json({ success: false, error: 'Failed to check Moltbook' });
+    }
+    
+    const data = await response.json();
+    const posts = data.posts || [];
+    
+    // Find a post containing our verification code
+    const verifyPost = posts.find(p => 
+      p.content && p.content.includes(`[${code}]`)
+    );
+    
+    if (!verifyPost) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Verification post not found. Make sure you posted the exact message with your code.',
+        code,
+        hint: 'Post must contain: [' + code + ']'
+      });
+    }
+    
+    // Found it! Mark as verified
+    const moltbookName = verifyPost.author?.name || 'Unknown';
+    await pool.query(
+      `UPDATE agents SET moltbook_verified = TRUE, moltbook_name = $1 WHERE id = $2`,
+      [moltbookName, req.agent.id]
+    );
+    
+    res.json({
+      success: true,
+      verified: true,
+      moltbookName,
+      message: `🦞 Verified as ${moltbookName} on Moltbook!`
+    });
+  } catch (err) {
+    console.error('Verify complete error:', err);
     res.status(500).json({ success: false, error: 'Internal error' });
   }
 });
