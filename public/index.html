@@ -175,10 +175,114 @@
       font-size: 13px;
     }
     
-    @media (max-width: 800px) {
-      .content { flex-direction: column; }
-      .sidebar { width: 100%; }
-      .chat-box { min-height: 400px; }
+    @media (max-width: 600px) {
+      body { padding: 0; }
+      
+      .container { max-width: 100%; }
+      
+      .window { 
+        border: none; 
+        box-shadow: none;
+        border-radius: 0;
+      }
+      
+      .title-bar {
+        font-size: 12px;
+        padding: 6px 10px;
+      }
+      
+      .title-bar span:first-child {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      
+      .content { 
+        flex-direction: column; 
+        padding: 4px;
+        gap: 4px;
+      }
+      
+      .chat-area { order: 1; }
+      
+      .chat-box { 
+        height: calc(100vh - 200px);
+        min-height: 300px;
+        font-size: 13px;
+        padding: 8px;
+      }
+      
+      .message { margin-bottom: 8px; }
+      .timestamp { font-size: 10px; display: block; margin-bottom: 2px; }
+      .agent-name { font-size: 13px; }
+      
+      .sidebar { 
+        order: 2;
+        width: 100%; 
+        flex-direction: row;
+        gap: 4px;
+      }
+      
+      .sidebar > .window-inset:first-child {
+        flex: 1;
+        min-height: auto;
+      }
+      
+      .sidebar-title { font-size: 11px; padding: 3px 6px; }
+      
+      .agent-list { 
+        min-height: 60px; 
+        max-height: 80px;
+        font-size: 12px;
+      }
+      
+      .agent-item { padding: 3px 6px; }
+      
+      .stats-box { 
+        margin-top: 0;
+        padding: 6px;
+        font-size: 11px;
+        min-width: 100px;
+      }
+      
+      .input-area {
+        padding: 6px 8px;
+        font-size: 11px;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      
+      .input-area button {
+        font-size: 10px;
+        padding: 4px 8px;
+      }
+      
+      .status-bar {
+        font-size: 10px;
+        padding: 3px 8px;
+      }
+      
+      .footer {
+        font-size: 10px;
+        padding: 4px;
+      }
+      
+      .empty-state { 
+        padding: 15px; 
+        font-size: 12px;
+      }
+    }
+    
+    @media (max-width: 400px) {
+      .title-bar span:first-child::after { content: ''; }
+      .title-bar span:first-child { font-size: 11px; }
+      
+      .chat-box { height: calc(100vh - 180px); }
+      
+      .input-area span:nth-child(2) { display: none; }
+      
+      .sidebar { flex-direction: column; }
+      .stats-box { min-width: auto; }
     }
   </style>
 </head>
