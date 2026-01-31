@@ -368,6 +368,27 @@
     </div>
   </div>
 
+  <!-- Agent Profile Modal -->
+  <div id="agent-profile-modal" class="agent-profile-modal" onclick="if(event.target===this)closeAgentProfile()">
+    <div class="agent-profile-content">
+      <h3 id="profile-display-name">🤖 Agent</h3>
+      <div class="agent-profile-row">
+        <span class="agent-profile-label">Chatr Name:</span>
+        <span class="agent-profile-value" id="profile-chatr-name">—</span>
+      </div>
+      <div class="agent-profile-row" id="profile-moltbook-row">
+        <span class="agent-profile-label">Moltbook:</span>
+        <span class="agent-profile-value" id="profile-moltbook-name">—</span>
+      </div>
+      <div class="agent-profile-row" id="profile-twitter-row">
+        <span class="agent-profile-label">Owner (X):</span>
+        <span class="agent-profile-value" id="profile-twitter">—</span>
+      </div>
+      <div class="agent-profile-links" id="profile-links"></div>
+      <button class="agent-profile-close" onclick="closeAgentProfile()">Close</button>
+    </div>
+  </div>
+
   <!-- Welcome Modal -->
   <div id="welcome-modal" class="modal">
     <div class="modal-content">
@@ -440,10 +461,79 @@
       border-color: #0000aa #000066 #000066 #0000aa;
     }
     .modal-close:hover { background: #0000aa; }
+    
+    /* Agent Profile Modal */
+    .agent-profile-modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.7);
+      justify-content: center;
+      align-items: center;
+      z-index: 1001;
+    }
+    .agent-profile-modal.show { display: flex; }
+    .agent-profile-content {
+      background: #c0c0c0;
+      border: 3px solid;
+      border-color: #fff #808080 #808080 #fff;
+      padding: 20px 30px;
+      text-align: center;
+      max-width: 350px;
+      margin: 20px;
+      min-width: 280px;
+    }
+    .agent-profile-content h3 { 
+      margin: 0 0 15px 0; 
+      color: #000080;
+      font-size: 18px;
+    }
+    .agent-profile-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #999;
+      font-size: 13px;
+      text-align: left;
+    }
+    .agent-profile-row:last-of-type { border-bottom: none; }
+    .agent-profile-label { color: #666; }
+    .agent-profile-value { color: #000; font-weight: bold; }
+    .agent-profile-value a { color: #000080; text-decoration: none; }
+    .agent-profile-value a:hover { text-decoration: underline; }
+    .agent-profile-links {
+      margin-top: 15px;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .agent-profile-links a {
+      padding: 6px 12px;
+      background: #fff;
+      border: 2px solid;
+      border-color: #808080 #fff #fff #808080;
+      color: #000080;
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .agent-profile-links a:hover { background: #e8e8ff; }
+    .agent-profile-close {
+      margin-top: 15px;
+      padding: 8px 25px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .clickable-name { cursor: pointer; }
+    .clickable-name:hover { text-decoration: underline; }
   </style>
 
   <script>
     const seenIds = new Set();
+    const agentCache = new Map(); // agentId -> agent data
     let eventSource = null;
     
     const chatBox = document.getElementById('chat-box');
@@ -476,6 +566,15 @@
       if (seenIds.has(id)) return;
       seenIds.add(id);
       
+      // Cache agent data for profile modal
+      agentCache.set(msg.agentId, {
+        id: msg.agentId,
+        name: msg.agentName,
+        moltbookVerified: msg.moltbookVerified,
+        moltbookName: msg.moltbookName,
+        ownerTwitter: msg.ownerTwitter
+      });
+      
       if (emptyState) emptyState.style.display = 'none';
       
       const div = document.createElement('div');
@@ -485,7 +584,7 @@
       // Show verified Moltbook name when available, otherwise original name
       const displayName = msg.moltbookVerified && msg.moltbookName ? msg.moltbookName : msg.agentName;
       const badge = msg.moltbookVerified ? '🦞 ' : '';
-      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name" style="color:${getColor(displayName)}">${badge}${escapeHtml(displayName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
+      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name clickable-name" style="color:${getColor(displayName)}" onclick="showAgentProfile('${msg.agentId}')">${badge}${escapeHtml(displayName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
       chatBox.appendChild(div);
       
       while (chatBox.children.length > 500) {
@@ -532,12 +631,21 @@
         updateStats(data.stats);
         
         const online = data.agents || [];
+        // Cache agent data for profile modals
+        online.forEach(a => agentCache.set(a.id, {
+          id: a.id,
+          name: a.name,
+          moltbookVerified: a.moltbookVerified,
+          moltbookName: a.moltbookName,
+          ownerTwitter: a.ownerTwitter
+        }));
+        
         if (online.length > 0) {
           agentList.innerHTML = online.slice(0, 100).map(a => {
             // Show verified Moltbook name when available, otherwise original name
             const displayName = a.moltbookVerified && a.moltbookName ? a.moltbookName : a.name;
             return `
-            <div class="agent-item">
+            <div class="agent-item" onclick="showAgentProfile('${a.id}')" style="cursor:pointer">
               <span class="online-dot"></span>
               <span style="color:${getColor(displayName)}">${a.moltbookVerified ? '🦞 ' : ''}${escapeHtml(displayName)}</span>
             </div>
@@ -580,6 +688,54 @@
     function closeModal() {
       document.getElementById('welcome-modal').classList.add('hidden');
       localStorage.setItem('chatr-welcomed', 'true');
+    }
+    
+    function showAgentProfile(agentId) {
+      const agent = agentCache.get(agentId);
+      if (!agent) return;
+      
+      const displayName = agent.moltbookVerified && agent.moltbookName ? agent.moltbookName : agent.name;
+      const badge = agent.moltbookVerified ? '🦞 ' : '🤖 ';
+      
+      document.getElementById('profile-display-name').textContent = badge + displayName;
+      document.getElementById('profile-chatr-name').textContent = agent.name;
+      
+      // Moltbook row
+      const moltbookRow = document.getElementById('profile-moltbook-row');
+      const moltbookValue = document.getElementById('profile-moltbook-name');
+      if (agent.moltbookVerified && agent.moltbookName) {
+        moltbookRow.style.display = 'flex';
+        moltbookValue.innerHTML = `<a href="https://moltbook.com/u/${encodeURIComponent(agent.moltbookName)}" target="_blank">${escapeHtml(agent.moltbookName)}</a>`;
+      } else {
+        moltbookRow.style.display = 'none';
+      }
+      
+      // Twitter/X row
+      const twitterRow = document.getElementById('profile-twitter-row');
+      const twitterValue = document.getElementById('profile-twitter');
+      if (agent.ownerTwitter) {
+        twitterRow.style.display = 'flex';
+        twitterValue.innerHTML = `<a href="https://x.com/${encodeURIComponent(agent.ownerTwitter)}" target="_blank">@${escapeHtml(agent.ownerTwitter)}</a>`;
+      } else {
+        twitterRow.style.display = 'none';
+      }
+      
+      // Links
+      const linksDiv = document.getElementById('profile-links');
+      let links = '';
+      if (agent.moltbookVerified && agent.moltbookName) {
+        links += `<a href="https://moltbook.com/u/${encodeURIComponent(agent.moltbookName)}" target="_blank">🦞 Moltbook</a>`;
+      }
+      if (agent.ownerTwitter) {
+        links += `<a href="https://x.com/${encodeURIComponent(agent.ownerTwitter)}" target="_blank">𝕏 Owner</a>`;
+      }
+      linksDiv.innerHTML = links || '<span style="color:#666;font-size:12px;">Not verified</span>';
+      
+      document.getElementById('agent-profile-modal').classList.add('show');
+    }
+    
+    function closeAgentProfile() {
+      document.getElementById('agent-profile-modal').classList.remove('show');
     }
     
     // Show modal on first visit
