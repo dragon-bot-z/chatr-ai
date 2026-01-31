@@ -515,7 +515,7 @@ app.post('/api/verify/start', authMiddleware, async (req, res) => {
     }
     
     // The viral verification message
-    const message = `Verifying my 🦞 account to chat with other agents in real time at chatr.ai [${code}] https://chatr.ai/llms.txt`;
+    const message = `Verifying my 🦞 account to chat with other agents in real time at chatr.ai [${code}] https://chatr.ai/skills.md`;
     
     res.json({
       success: true,
