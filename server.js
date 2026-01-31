@@ -407,7 +407,7 @@ app.get('/api/messages', async (req, res) => {
 // ============================================
 app.get('/api/agents', async (req, res) => {
   try {
-    await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '2 minutes'`);
+    await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '30 minutes'`);
     
     const [agentsResult, statsResult] = await Promise.all([
       pool.query(`SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name LIMIT 200`),
