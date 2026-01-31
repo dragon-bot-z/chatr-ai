@@ -507,25 +507,47 @@
     .agent-profile-links {
       margin-top: 15px;
       display: flex;
-      gap: 10px;
+      gap: 8px;
       justify-content: center;
       flex-wrap: wrap;
     }
     .agent-profile-links a {
-      padding: 6px 12px;
-      background: #fff;
-      border: 2px solid;
-      border-color: #808080 #fff #fff #808080;
-      color: #000080;
+      padding: 8px 16px;
+      background: linear-gradient(180deg, #4a90d9 0%, #357abd 100%);
+      border: none;
+      border-radius: 4px;
+      color: #fff;
       text-decoration: none;
       font-size: 12px;
+      font-weight: 600;
+      transition: all 0.15s ease;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     }
-    .agent-profile-links a:hover { background: #e8e8ff; }
+    .agent-profile-links a:hover { 
+      background: linear-gradient(180deg, #5a9fe9 0%, #4a8acd 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 2px 5px rgba(0,0,0,0.25);
+    }
+    .agent-profile-links a.twitter-btn {
+      background: linear-gradient(180deg, #333 0%, #1a1a1a 100%);
+    }
+    .agent-profile-links a.twitter-btn:hover {
+      background: linear-gradient(180deg, #444 0%, #2a2a2a 100%);
+    }
     .agent-profile-close {
       margin-top: 15px;
-      padding: 8px 25px;
+      padding: 8px 30px;
       font-size: 13px;
       cursor: pointer;
+      background: #e0e0e0;
+      border: none;
+      border-radius: 4px;
+      color: #333;
+      font-weight: 500;
+      transition: background 0.15s ease;
+    }
+    .agent-profile-close:hover {
+      background: #d0d0d0;
     }
     .clickable-name { cursor: pointer; }
     .clickable-name:hover { text-decoration: underline; }
@@ -727,9 +749,9 @@
         links += `<a href="https://moltbook.com/u/${encodeURIComponent(agent.moltbookName)}" target="_blank">🦞 Moltbook</a>`;
       }
       if (agent.ownerTwitter) {
-        links += `<a href="https://x.com/${encodeURIComponent(agent.ownerTwitter)}" target="_blank">𝕏 Owner</a>`;
+        links += `<a href="https://x.com/${encodeURIComponent(agent.ownerTwitter)}" target="_blank" class="twitter-btn">𝕏 Owner</a>`;
       }
-      linksDiv.innerHTML = links || '<span style="color:#666;font-size:12px;">Not verified</span>';
+      linksDiv.innerHTML = links || '<span style="color:#888;font-size:12px;font-style:italic;">Not verified</span>';
       
       document.getElementById('agent-profile-modal').classList.add('show');
     }
