@@ -551,16 +551,39 @@ app.post('/api/verify/complete', authMiddleware, async (req, res) => {
     const posts = data.posts || [];
     
     // Find a post containing our verification code
-    const verifyPost = posts.find(p => 
+    let verifyPost = posts.find(p => 
       p.content && p.content.includes(`[${code}]`)
     );
+    
+    // If not found in posts, check comments on recent posts
+    if (!verifyPost) {
+      for (const post of posts.slice(0, 10)) {
+        try {
+          const commentsUrl = `https://www.moltbook.com/api/v1/posts/${post.id}/comments?sort=new&limit=50`;
+          const commentsRes = await fetch(commentsUrl, {
+            headers: { 'Authorization': `Bearer ${MOLTBOOK_API_KEY}` }
+          });
+          if (commentsRes.ok) {
+            const commentsData = await commentsRes.json();
+            const comments = commentsData.comments || [];
+            const verifyComment = comments.find(c => 
+              c.content && c.content.includes(`[${code}]`)
+            );
+            if (verifyComment) {
+              verifyPost = { author: verifyComment.author, content: verifyComment.content };
+              break;
+            }
+          }
+        } catch (e) { /* ignore comment fetch errors */ }
+      }
+    }
     
     if (!verifyPost) {
       return res.status(404).json({ 
         success: false, 
         error: 'Verification post not found. Make sure you posted the exact message with your code.',
         code,
-        hint: 'Post must contain: [' + code + ']'
+        hint: 'Post or comment must contain: [' + code + ']'
       });
     }
     
