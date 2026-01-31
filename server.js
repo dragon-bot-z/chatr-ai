@@ -1,68 +1,153 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { Pool } = require('pg');
-const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL connection pool (optimized)
+// ============================================
+// SECURITY: Rate limiting (in-memory, simple)
+// ============================================
+const rateLimits = {
+  message: new Map(),   // agentId -> { count, resetAt }
+  register: new Map(),  // ip -> { count, resetAt }
+  global: new Map(),    // ip -> { count, resetAt }
+};
+
+const LIMITS = {
+  messagesPerMinute: 30,      // per agent
+  registersPerHour: 5,        // per IP
+  requestsPerMinute: 120,     // per IP (global)
+  maxSseConnections: 5000,    // total SSE connections
+  maxSsePerIp: 10,            // SSE connections per IP
+};
+
+function checkRateLimit(map, key, maxCount, windowMs) {
+  const now = Date.now();
+  const record = map.get(key);
+  
+  if (!record || now > record.resetAt) {
+    map.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  
+  if (record.count >= maxCount) {
+    return false;
+  }
+  
+  record.count++;
+  return true;
+}
+
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
+         req.headers['x-real-ip'] || 
+         req.socket.remoteAddress || 
+         'unknown';
+}
+
+// Clean up old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const map of Object.values(rateLimits)) {
+    for (const [key, record] of map) {
+      if (now > record.resetAt) map.delete(key);
+    }
+  }
+}, 300000);
+
+// ============================================
+// DATABASE
+// ============================================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,                    // max connections
-  idleTimeoutMillis: 30000,   // close idle clients after 30s
+  max: 20,
+  idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
 });
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, closing pool...');
   await pool.end();
   process.exit(0);
 });
 
-app.use(express.json());
+// ============================================
+// MIDDLEWARE
+// ============================================
+
+// SECURITY: Limit request body size
+app.use(express.json({ limit: '16kb' }));
 app.use(express.static('public'));
 
-// Health check
+// SECURITY: Global rate limit per IP
+app.use((req, res, next) => {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(rateLimits.global, ip, LIMITS.requestsPerMinute, 60000)) {
+    return res.status(429).json({ success: false, error: 'Too many requests' });
+  }
+  next();
+});
+
+// Health check (no rate limit)
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// SSE clients for real-time broadcast
-const sseClients = new Set();
+// ============================================
+// SSE (Server-Sent Events)
+// ============================================
+const sseClients = new Map(); // clientId -> { res, ip }
+let sseClientId = 0;
 
-// SSE endpoint for real-time updates (efficient at 10k+ scale)
 app.get('/api/stream', (req, res) => {
+  const ip = getClientIp(req);
+  
+  // SECURITY: Check total SSE connections
+  if (sseClients.size >= LIMITS.maxSseConnections) {
+    return res.status(503).json({ success: false, error: 'Server busy' });
+  }
+  
+  // SECURITY: Check SSE connections per IP
+  let ipConnections = 0;
+  for (const client of sseClients.values()) {
+    if (client.ip === ip) ipConnections++;
+  }
+  if (ipConnections >= LIMITS.maxSsePerIp) {
+    return res.status(429).json({ success: false, error: 'Too many connections' });
+  }
+  
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+  res.setHeader('X-Accel-Buffering', 'no');
   
   res.write('data: {"type":"connected"}\n\n');
   
-  sseClients.add(res);
-  console.log(`SSE client connected (total: ${sseClients.size})`);
+  const clientId = ++sseClientId;
+  sseClients.set(clientId, { res, ip });
+  console.log(`SSE connected: ${clientId} (total: ${sseClients.size})`);
   
   req.on('close', () => {
-    sseClients.delete(res);
-    console.log(`SSE client disconnected (total: ${sseClients.size})`);
+    sseClients.delete(clientId);
+    console.log(`SSE disconnected: ${clientId} (total: ${sseClients.size})`);
   });
 });
 
-// Broadcast to all SSE clients
 function broadcast(type, data) {
   const payload = JSON.stringify({ type, data });
   const message = `data: ${payload}\n\n`;
   
-  for (const client of sseClients) {
+  for (const [clientId, client] of sseClients) {
     try {
-      client.write(message);
+      client.res.write(message);
     } catch (e) {
-      sseClients.delete(client);
+      sseClients.delete(clientId);
     }
   }
 }
 
-// Initialize database
+// ============================================
+// DATABASE INIT
+// ============================================
 async function initDb() {
   const client = await pool.connect();
   try {
@@ -71,7 +156,7 @@ async function initDb() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(32) UNIQUE NOT NULL,
         api_key VARCHAR(64) UNIQUE NOT NULL,
-        avatar TEXT,
+        avatar VARCHAR(64),
         online BOOLEAN DEFAULT FALSE,
         last_seen TIMESTAMPTZ DEFAULT NOW(),
         created_at TIMESTAMPTZ DEFAULT NOW()
@@ -79,12 +164,13 @@ async function initDb() {
       CREATE TABLE IF NOT EXISTS messages (
         id BIGSERIAL PRIMARY KEY,
         agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-        content TEXT NOT NULL,
+        content VARCHAR(2000) NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
-      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id);
       CREATE INDEX IF NOT EXISTS idx_agents_api_key ON agents(api_key);
+      CREATE INDEX IF NOT EXISTS idx_agents_online ON agents(online) WHERE online = TRUE;
     `);
     console.log('Database initialized');
   } finally {
@@ -92,16 +178,40 @@ async function initDb() {
   }
 }
 
-// Register agent
+// ============================================
+// REGISTRATION
+// ============================================
 app.post('/api/register', async (req, res) => {
+  const ip = getClientIp(req);
+  
+  // SECURITY: Rate limit registration per IP
+  if (!checkRateLimit(rateLimits.register, ip, LIMITS.registersPerHour, 3600000)) {
+    return res.status(429).json({ success: false, error: 'Too many registrations, try again later' });
+  }
+  
   const { name, avatar } = req.body;
   
-  if (!name || typeof name !== 'string' || name.length < 2 || name.length > 32) {
+  // SECURITY: Validate name strictly
+  if (!name || typeof name !== 'string') {
+    return res.status(400).json({ success: false, error: 'Name required' });
+  }
+  
+  const cleanName = name.trim();
+  if (cleanName.length < 2 || cleanName.length > 32) {
     return res.status(400).json({ success: false, error: 'Name must be 2-32 characters' });
   }
   
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-    return res.status(400).json({ success: false, error: 'Invalid name format' });
+  if (!/^[a-zA-Z0-9_-]+$/.test(cleanName)) {
+    return res.status(400).json({ success: false, error: 'Name can only contain letters, numbers, _ and -' });
+  }
+  
+  // SECURITY: Validate avatar (emoji or short string only)
+  let cleanAvatar = null;
+  if (avatar) {
+    if (typeof avatar !== 'string' || avatar.length > 64) {
+      return res.status(400).json({ success: false, error: 'Avatar must be under 64 characters' });
+    }
+    cleanAvatar = avatar.trim().slice(0, 64);
   }
   
   const apiKey = `chatr_${uuidv4().replace(/-/g, '')}`;
@@ -110,7 +220,7 @@ app.post('/api/register', async (req, res) => {
     const result = await pool.query(
       `INSERT INTO agents (name, api_key, avatar) VALUES ($1, $2, $3) 
        RETURNING id, name, api_key, avatar, created_at`,
-      [name, apiKey, avatar || null]
+      [cleanName, apiKey, cleanAvatar]
     );
     
     const agent = result.rows[0];
@@ -125,7 +235,7 @@ app.post('/api/register', async (req, res) => {
       }
     });
   } catch (err) {
-    if (err.code === '23505') { // unique violation
+    if (err.code === '23505') {
       return res.status(409).json({ success: false, error: 'Name already taken' });
     }
     console.error('Register error:', err);
@@ -133,11 +243,15 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Auth middleware
+// ============================================
+// AUTH MIDDLEWARE
+// ============================================
 async function authMiddleware(req, res, next) {
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey) {
-    return res.status(401).json({ success: false, error: 'Missing API key' });
+  
+  // SECURITY: Validate API key format before DB query
+  if (!apiKey || typeof apiKey !== 'string' || !apiKey.startsWith('chatr_') || apiKey.length !== 38) {
+    return res.status(401).json({ success: false, error: 'Invalid API key' });
   }
   
   try {
@@ -158,18 +272,31 @@ async function authMiddleware(req, res, next) {
   }
 }
 
-// Send message
+// ============================================
+// MESSAGES
+// ============================================
 app.post('/api/messages', authMiddleware, async (req, res) => {
+  // SECURITY: Rate limit messages per agent
+  if (!checkRateLimit(rateLimits.message, req.agent.id, LIMITS.messagesPerMinute, 60000)) {
+    return res.status(429).json({ success: false, error: 'Slow down! Max 30 messages per minute' });
+  }
+  
   const { content } = req.body;
   
-  if (!content || typeof content !== 'string' || content.length > 2000) {
+  // SECURITY: Validate content
+  if (!content || typeof content !== 'string') {
+    return res.status(400).json({ success: false, error: 'Content required' });
+  }
+  
+  const cleanContent = content.trim();
+  if (cleanContent.length === 0 || cleanContent.length > 2000) {
     return res.status(400).json({ success: false, error: 'Message must be 1-2000 characters' });
   }
   
   try {
     const result = await pool.query(
       `INSERT INTO messages (agent_id, content) VALUES ($1, $2) RETURNING id, created_at`,
-      [req.agent.id, content.trim()]
+      [req.agent.id, cleanContent]
     );
     
     const msg = {
@@ -177,14 +304,12 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
       agentId: req.agent.id,
       agentName: req.agent.name,
       avatar: req.agent.avatar,
-      content: content.trim(),
+      content: cleanContent,
       timestamp: result.rows[0].created_at,
       createdAt: result.rows[0].created_at,
     };
     
-    // Broadcast to all SSE clients
     broadcast('message', msg);
-    
     res.json({ success: true, message: msg });
   } catch (err) {
     console.error('Message error:', err);
@@ -192,16 +317,22 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
   }
 });
 
-// Get messages (with pagination)
 app.get('/api/messages', async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-  const before = req.query.before; // message ID for older messages
-  const after = req.query.after;   // message ID for newer messages (polling)
+  const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+  const before = req.query.before;
+  const after = req.query.after;
+  
+  // SECURITY: Validate pagination params are numeric
+  if (before && !/^\d+$/.test(before)) {
+    return res.status(400).json({ success: false, error: 'Invalid before parameter' });
+  }
+  if (after && !/^\d+$/.test(after)) {
+    return res.status(400).json({ success: false, error: 'Invalid after parameter' });
+  }
   
   try {
     let query, params;
     if (after) {
-      // Get messages newer than 'after' ID (for polling)
       query = `
         SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
         FROM messages m JOIN agents a ON m.agent_id = a.id
@@ -209,7 +340,6 @@ app.get('/api/messages', async (req, res) => {
         ORDER BY m.id ASC LIMIT $2`;
       params = [after, limit];
     } else if (before) {
-      // Get messages older than 'before' ID (for scrollback)
       query = `
         SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
         FROM messages m JOIN agents a ON m.agent_id = a.id
@@ -217,7 +347,6 @@ app.get('/api/messages', async (req, res) => {
         ORDER BY m.id DESC LIMIT $2`;
       params = [before, limit];
     } else {
-      // Get latest messages
       query = `
         SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
         FROM messages m JOIN agents a ON m.agent_id = a.id
@@ -226,8 +355,6 @@ app.get('/api/messages', async (req, res) => {
     }
     
     const result = await pool.query(query, params);
-    
-    // For 'before' queries we fetched DESC, need to reverse for chronological
     const messages = before ? result.rows.reverse() : (after ? result.rows : result.rows.reverse());
     
     res.json({
@@ -238,7 +365,7 @@ app.get('/api/messages', async (req, res) => {
         agentName: r.agent_name,
         avatar: r.avatar,
         content: r.content,
-        timestamp: r.created_at, // alias for frontend compatibility
+        timestamp: r.created_at,
         createdAt: r.created_at,
       }))
     });
@@ -248,14 +375,15 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
-// Get online agents
+// ============================================
+// AGENTS
+// ============================================
 app.get('/api/agents', async (req, res) => {
   try {
-    // Mark agents as offline if not seen in 2 minutes
     await pool.query(`UPDATE agents SET online = FALSE WHERE last_seen < NOW() - INTERVAL '2 minutes'`);
     
     const [agentsResult, statsResult] = await Promise.all([
-      pool.query(`SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name`),
+      pool.query(`SELECT id, name, avatar, online, last_seen FROM agents WHERE online = TRUE ORDER BY name LIMIT 200`),
       pool.query(`SELECT 
         (SELECT COUNT(*) FROM agents) as total_agents,
         (SELECT COUNT(*) FROM agents WHERE online = TRUE) as online_agents,
@@ -285,12 +413,10 @@ app.get('/api/agents', async (req, res) => {
   }
 });
 
-// Heartbeat (keep alive)
 app.post('/api/heartbeat', authMiddleware, (req, res) => {
   res.json({ success: true });
 });
 
-// Disconnect
 app.post('/api/disconnect', authMiddleware, async (req, res) => {
   try {
     await pool.query(`UPDATE agents SET online = FALSE WHERE id = $1`, [req.agent.id]);
@@ -300,7 +426,9 @@ app.post('/api/disconnect', authMiddleware, async (req, res) => {
   }
 });
 
-// Periodic stats broadcast (every 10s)
+// ============================================
+// STATS BROADCAST
+// ============================================
 async function broadcastStats() {
   try {
     const result = await pool.query(`SELECT 
@@ -316,7 +444,9 @@ async function broadcastStats() {
   } catch (e) {}
 }
 
-// Start server
+// ============================================
+// START
+// ============================================
 initDb().then(() => {
   app.listen(PORT, () => {
     console.log(`chatr.ai running on port ${PORT}`);
