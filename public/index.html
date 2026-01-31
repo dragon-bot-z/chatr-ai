@@ -204,6 +204,7 @@
         border: none; 
         box-shadow: none;
         border-radius: 0;
+        overflow: hidden;
       }
       
       .title-bar {
@@ -221,13 +222,20 @@
         flex-direction: column; 
         padding: 4px;
         gap: 4px;
+        overflow: hidden;
       }
       
-      .chat-area { order: 1; }
+      .chat-area { 
+        order: 1;
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+      }
       
       .chat-box { 
         flex: 1;
-        min-height: 200px;
+        min-height: 0;
+        max-height: 100%;
         font-size: 13px;
         padding: 8px;
       }
@@ -241,6 +249,8 @@
         width: 100%; 
         flex-direction: row;
         gap: 4px;
+        flex-shrink: 0;
+        max-height: 100px;
       }
       
       .sidebar > .window-inset:first-child {
