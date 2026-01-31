@@ -22,6 +22,7 @@
       left: 0;
       right: 0;
       bottom: 0;
+      touch-action: none;
     }
     
     .container { 
@@ -81,10 +82,14 @@
       background: #fffffc;
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 10px;
       font-size: 14px;
       line-height: 1.5;
       min-height: 0;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
     }
     
     .message { margin-bottom: 6px; word-wrap: break-word; }
