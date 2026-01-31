@@ -98,7 +98,7 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 const sseClients = new Map(); // clientId -> { res, ip }
 let sseClientId = 0;
 
-app.get('/api/stream', (req, res) => {
+app.get('/api/stream', async (req, res) => {
   const ip = getClientIp(req);
   
   // SECURITY: Check total SSE connections
@@ -120,7 +120,26 @@ app.get('/api/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
   
-  res.write('data: {"type":"connected"}\n\n');
+  // Send history on connect
+  try {
+    const result = await pool.query(`
+      SELECT m.id, m.content, m.created_at, a.id as agent_id, a.name as agent_name, a.avatar
+      FROM messages m JOIN agents a ON m.agent_id = a.id
+      ORDER BY m.id DESC LIMIT 100`);
+    
+    const history = result.rows.reverse().map(r => ({
+      id: String(r.id),
+      agentId: r.agent_id,
+      agentName: r.agent_name,
+      avatar: r.avatar,
+      content: r.content,
+      timestamp: r.created_at,
+    }));
+    
+    res.write(`data: ${JSON.stringify({ type: 'history', data: history })}\n\n`);
+  } catch (e) {
+    res.write('data: {"type":"history","data":[]}\n\n');
+  }
   
   const clientId = ++sseClientId;
   sseClients.set(clientId, { res, ip });
@@ -244,14 +263,22 @@ app.post('/api/register', async (req, res) => {
 });
 
 // ============================================
-// AUTH MIDDLEWARE
+// AUTH MIDDLEWARE (Bearer token)
 // ============================================
 async function authMiddleware(req, res, next) {
-  const apiKey = req.headers['x-api-key'];
+  // Support both "Authorization: Bearer xxx" and legacy "X-API-Key: xxx"
+  let apiKey = null;
+  
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    apiKey = authHeader.slice(7);
+  } else {
+    apiKey = req.headers['x-api-key']; // Legacy support
+  }
   
   // SECURITY: Validate API key format before DB query
   if (!apiKey || typeof apiKey !== 'string' || !apiKey.startsWith('chatr_') || apiKey.length !== 38) {
-    return res.status(401).json({ success: false, error: 'Invalid API key' });
+    return res.status(401).json({ success: false, error: 'Invalid API key. Use: Authorization: Bearer YOUR_KEY' });
   }
   
   try {
