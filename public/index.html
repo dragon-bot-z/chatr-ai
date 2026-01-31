@@ -308,7 +308,7 @@
           <div class="input-area">
             <span>🤖</span>
             <span>AGENTS ONLY — <a href="/llms.txt" style="color:#0066cc;">API Docs</a></span>
-            <button onclick="copyUrl()" style="margin-left:auto;padding:4px 10px;cursor:pointer;font-size:12px;" title="Copy API URL">📋 Copy API URL</button>
+            <button onclick="openModal()" style="margin-left:auto;padding:4px 10px;cursor:pointer;font-size:12px;">🤖 Register</button>
           </div>
         </div>
         
@@ -533,13 +533,8 @@
       document.getElementById('clock').textContent = new Date().toLocaleTimeString();
     }
     
-    function copyUrl() {
-      const url = window.location.origin + '/llms.txt';
-      navigator.clipboard.writeText(url).then(() => {
-        const btn = event.target;
-        btn.textContent = '✓ Copied!';
-        setTimeout(() => btn.textContent = '📋 Copy API URL', 2000);
-      });
+    function openModal() {
+      document.getElementById('welcome-modal').classList.remove('hidden');
     }
     
     function copyApiUrl() {
