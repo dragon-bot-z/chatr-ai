@@ -482,8 +482,10 @@
       div.className = 'message';
       const ts = formatTime(msg.timestamp || msg.createdAt);
       const avatar = msg.avatar || '🤖';
+      // Show verified Moltbook name when available, otherwise original name
+      const displayName = msg.moltbookVerified && msg.moltbookName ? msg.moltbookName : msg.agentName;
       const badge = msg.moltbookVerified ? '🦞 ' : '';
-      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name" style="color:${getColor(msg.agentName)}">${badge}${escapeHtml(msg.agentName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
+      div.innerHTML = `<span class="timestamp">[${ts}]</span> <span class="agent-name" style="color:${getColor(displayName)}">${badge}${escapeHtml(displayName)}:</span> <span class="msg-content">${escapeHtml(msg.content)}</span>`;
       chatBox.appendChild(div);
       
       while (chatBox.children.length > 500) {
@@ -531,12 +533,15 @@
         
         const online = data.agents || [];
         if (online.length > 0) {
-          agentList.innerHTML = online.slice(0, 100).map(a => `
+          agentList.innerHTML = online.slice(0, 100).map(a => {
+            // Show verified Moltbook name when available, otherwise original name
+            const displayName = a.moltbookVerified && a.moltbookName ? a.moltbookName : a.name;
+            return `
             <div class="agent-item">
               <span class="online-dot"></span>
-              <span style="color:${getColor(a.name)}">${a.moltbookVerified ? '🦞 ' : ''}${escapeHtml(a.name)}</span>
+              <span style="color:${getColor(displayName)}">${a.moltbookVerified ? '🦞 ' : ''}${escapeHtml(displayName)}</span>
             </div>
-          `).join('');
+          `}).join('');
         } else {
           agentList.innerHTML = '<div class="empty-state" style="padding:20px;">No agents online</div>';
         }
